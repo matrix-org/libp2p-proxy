@@ -18,104 +18,53 @@
 package main
 
 import (
-    "context"
-    "crypto/rand"
-    "flag"
-    "io/ioutil"
-    "log"
+	"flag"
+	"log"
+	"net/http"
 
-    "github.com/libp2p/go-libp2p"
-    "github.com/libp2p/go-libp2p-core/crypto"
+	"github.com/gorilla/mux"
+
+//	gologging "github.com/whyrusleeping/go-logging"
+//	golog "github.com/ipfs/go-log"
 )
 
 var (
-    httpTarget   = flag.String("http-target", "http://127.0.0.1:8008", "The HTTP host+port the requests to this peer are sent to")
-    httpPort     = flag.String("http-port", "8888", "The HTTP port to listen on")
-    identityFile = flag.String("identity-file", "./identity", "A file containig the libp2p peer's private key.")
+	httpTarget         = *flag.String("http-target", "http://127.0.0.1:8008", "The HTTP host+port the requests to this peer are sent to")
+	httpPort           = *flag.Int("http-port", 8999, "The HTTP port to listen on")
+	p2pPort            = *flag.Int("p2p-port", 8998, "The port libp2p listens on for p2p communication.")
+	identityFile       = *flag.String("identity-file", "./identity", "A file containig the libp2p peer's private key.")
+	bootstrapPeersFile = *flag.String("peers-file", "./bootstrap", "A file containing ipfs peers used for discovering other peers via id alone.")
 )
 
 func init() {
-    flag.Parse()
+	flag.Parse()
 }
 
 func main() {
+	// LibP2P code uses golog to log messages. They log with different
+	// string IDs (i.e. "swarm"). We can control the verbosity level for
+	// all loggers with:
+//	golog.SetAllLoggers(gologging.INFO) // Change to DEBUG for extra info
 
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+	privKey := GetLibp2pPrivKey(identityFile)
 
-    privKey := getLibp2pPrivKey(*identityFile)
+	host, err := MakeRoutedHost(p2pPort, privKey, IPFS_PEERS)
 
-    h, err := libp2p.New(
-	ctx,
-	libp2p.Identity(privKey),
-    )
+	proxyService := NewProxyService(host)
 
-    if err != nil {
-	log.Fatal("Couldn't start libp2p host.")
-    }
-
-    log.Printf("Started host with id %s", h.ID())
-
-}
-
-// Retrieve the identity (the private key) for the p2p peer
-// Tries to retrieve the identity from the specified file.
-// If the file doesn't exist it will try to create it.
-// If the content of the file is not a valid encoded p2p
-// PrivKey it will exit.
-func getLibp2pPrivKey(identityFile string) crypto.PrivKey {
-    encodedPrivateKey, err := ioutil.ReadFile(identityFile)
-
-    var privKey crypto.PrivKey
-
-    if err != nil {
-	log.Printf("Couldn't find an identity in %s, creating new idenitity.\n", identityFile)
-	privKey = createPeerIdentity(identityFile)
-	log.Println("Identity created")
-    } else {
-	handler := func(err error) {
-	    if err != nil {
-		log.Fatalf("The identity in %s is invalid. Shutting down proxy.", identityFile)
-	    }
+	if err != nil {
+		panic(err)
+		log.Fatal("Couldn't start libp2p host.")
 	}
 
-	decodedPrivateKey, err := crypto.ConfigDecodeKey(string(encodedPrivateKey))
+	// Set up the http handlers
+	r := mux.NewRouter()
+	r.HandleFunc("/{.*}", proxyService.ServeHTTP).Host("{identity:.*}.matrixp2p")
+	r.HandleFunc("/{.*}", proxyService.ServeHTTPS)
 
-	handler(err)
+	http.ListenAndServe(":7667", r)
 
-	privKey, err = crypto.UnmarshalPrivateKey(decodedPrivateKey)
 
-	handler(err)
-    }
-
-    return privKey
+	select {}
 }
-
-func createPeerIdentity(identityFile string) crypto.PrivKey {
-    r := rand.Reader
-
-    privKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
-
-    if err != nil {
-	panic(err)
-    }
-
-    privKeyBytes, err := crypto.MarshalPrivateKey(privKey)
-
-    if err != nil {
-	panic(err)
-    }
-
-    encodedPrivateKey := crypto.ConfigEncodeKey(privKeyBytes)
-
-    // Only the current user has access to the identity file
-    err = ioutil.WriteFile(identityFile, []byte(encodedPrivateKey), 0600)
-
-    if err != nil {
-	log.Fatalf("Couldn't write the idenity file to %s", identityFile)
-    }
-
-    return privKey
-}
-
 
